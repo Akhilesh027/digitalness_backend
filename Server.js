@@ -25,6 +25,8 @@ const allowedOrigins = [
   "http://localhost:8080",
   "http://localhost:5173",
   "http://localhost:3000",
+  "exp://10.77.15.28:8081",
+  "https://chic-pony-e330ef.netlify.app",
   process.env.CLIENT_URL,
 ].filter(Boolean);
 
