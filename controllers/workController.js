@@ -3,6 +3,7 @@ const Customer = require("../models/Customer.js");
 const createNotification = require("../utils/createNotification");
 const WorkApproval = require("../models/WorkApproval.js");
 const User = require("../models/User");
+
 const getUserId = (user) => user?._id || user?.id || user;
 
 const allowedStatuses = [
@@ -26,7 +27,6 @@ const notifyUser = async ({
   link = "/works",
 }) => {
   if (!recipient) return;
-
   await createNotification({
     title,
     message,
@@ -47,13 +47,9 @@ const notifyMany = async (recipients = [], payload) => {
         .map((recipient) => String(getUserId(recipient)))
     ),
   ];
-
   await Promise.all(
     uniqueRecipients.map((recipient) =>
-      notifyUser({
-        ...payload,
-        recipient,
-      })
+      notifyUser({ ...payload, recipient })
     )
   );
 };
@@ -62,7 +58,7 @@ const populateWork = async (id) => {
   return await Work.findById(id)
     .populate({
       path: "customer",
-      select: "name customerName clientName companyName email phone",
+      select: "name businessType contactNumbers email city branchId assignedTo",
     })
     .populate({
       path: "assignedTo",
@@ -74,6 +70,9 @@ const populateWork = async (id) => {
     });
 };
 
+// --------------------------------------------------------------
+// CREATE WORK
+// --------------------------------------------------------------
 exports.createWork = async (req, res) => {
   try {
     const {
@@ -102,7 +101,6 @@ exports.createWork = async (req, res) => {
     }
 
     const customerExists = await Customer.findById(finalCustomer);
-
     if (!customerExists) {
       return res.status(404).json({
         success: false,
@@ -110,9 +108,7 @@ exports.createWork = async (req, res) => {
       });
     }
 
-    const finalAssignedTo = Array.isArray(assignedTo)
-      ? assignedTo
-      : [assignedTo];
+    const finalAssignedTo = Array.isArray(assignedTo) ? assignedTo : [assignedTo];
 
     const newWork = await Work.create({
       title,
@@ -129,6 +125,7 @@ exports.createWork = async (req, res) => {
       status: "Not Started",
     });
 
+    // Optional: update customer's embedded works array (if you keep it)
     await Customer.findByIdAndUpdate(
       finalCustomer,
       {
@@ -158,7 +155,6 @@ exports.createWork = async (req, res) => {
     });
 
     const populatedWork = await populateWork(newWork._id);
-
     res.status(201).json({
       success: true,
       message: "Work created, assigned and saved to customer successfully",
@@ -173,28 +169,47 @@ exports.createWork = async (req, res) => {
   }
 };
 
+// --------------------------------------------------------------
+// GET ALL WORKS (with role‑based filtering + branch query)
+// --------------------------------------------------------------
 exports.getAllWorks = async (req, res) => {
   try {
-    let query = {};
+    const { branchId } = req.query; // optional branch filter
+    const user = req.user;
+    let filter = {};
 
-    if (req.user.role !== "admin" && req.user.role !== "Admin") {
-      query = {
-        assignedTo: { $in: [req.user._id] },
-      };
+    // 1. Role‑based filtering
+    if (user.role === "Admin" || user.role === "admin") {
+      // Admin sees everything – no extra filter
+    } 
+    else if (user.role === "Operational Manager") {
+      // Operational Manager sees works from customers in their branch
+      const customers = await Customer.find({ branchId: user.branchId }).distinct("_id");
+      filter.customer = { $in: customers };
+    } 
+    else {
+      // Telecaller, Sales Rep, etc. – see only works assigned to them
+      filter.assignedTo = { $in: [user._id] };
     }
 
-    const works = await Work.find(query)
+    // 2. Apply optional branch query parameter (overrides or narrows further)
+    if (branchId) {
+      const customersInBranch = await Customer.find({ branchId }).distinct("_id");
+      filter.customer = { $in: customersInBranch };
+    }
+
+    const works = await Work.find(filter)
       .populate({
         path: "customer",
-        select: "name customerName clientName companyName email phone",
+        select: "name businessType contactNumbers email city branchId assignedTo",
       })
       .populate({
         path: "assignedTo",
-        select: "name fullName username email role department",
+        select: "name email role department",
       })
       .populate({
         path: "createdBy",
-        select: "name fullName username email role",
+        select: "name email role",
       })
       .sort({ createdAt: -1 });
 
@@ -204,8 +219,7 @@ exports.getAllWorks = async (req, res) => {
       data: works,
     });
   } catch (error) {
-    console.log("GET WORKS ERROR:", error);
-
+    console.error("GET WORKS ERROR:", error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch works",
@@ -214,6 +228,9 @@ exports.getAllWorks = async (req, res) => {
   }
 };
 
+// --------------------------------------------------------------
+// GET WORKS FOR A SPECIFIC EMPLOYEE
+// --------------------------------------------------------------
 exports.getEmployeeWorks = async (req, res) => {
   try {
     const works = await Work.find({
@@ -236,10 +253,12 @@ exports.getEmployeeWorks = async (req, res) => {
   }
 };
 
+// --------------------------------------------------------------
+// UPDATE WORK STATUS (with approval & notifications)
+// --------------------------------------------------------------
 exports.updateWorkStatus = async (req, res) => {
   try {
     const { status } = req.body;
-
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
@@ -248,7 +267,6 @@ exports.updateWorkStatus = async (req, res) => {
     }
 
     const oldWork = await Work.findById(req.params.id);
-
     if (!oldWork) {
       return res.status(404).json({
         success: false,
@@ -262,6 +280,7 @@ exports.updateWorkStatus = async (req, res) => {
       { new: true }
     );
 
+    // Update customer's embedded works array
     await Customer.updateOne(
       {
         _id: updatedWork.customer,
@@ -277,9 +296,7 @@ exports.updateWorkStatus = async (req, res) => {
     const assignedUsers = Array.isArray(updatedWork.assignedTo)
       ? updatedWork.assignedTo
       : [updatedWork.assignedTo];
-
     const changedBy = req.user?._id;
-
     const recipients = assignedUsers.filter(
       (userId) => String(userId) !== String(changedBy)
     );
@@ -287,54 +304,53 @@ exports.updateWorkStatus = async (req, res) => {
     let title = "Work Status Updated";
     let message = `${updatedWork.title} status changed to ${status}.`;
 
-   if (status === "Review") {
-  title = "Work Submitted For Review";
-  message = `${updatedWork.title} has been submitted for review.`;
+    if (status === "Review") {
+      title = "Work Submitted For Review";
+      message = `${updatedWork.title} has been submitted for review.`;
 
-  // CREATE APPROVAL ENTRY
-  const approval = await WorkApproval.create({
-    work: updatedWork._id,
-    customer: updatedWork.customer,
-    submittedBy: req.user._id,
-    assignedTo: updatedWork.assignedTo,
-    reviewMessage:
-      updatedWork.progressNote ||
-      `${updatedWork.title} submitted for approval`,
-  });
-
-  // FIND ADMINS
-  const admins = await User.find({
-    role: { $in: ["Admin", "admin"] },
-  });
-
-  // SEND NOTIFICATIONS TO ADMINS
-  await Promise.all(
-    admins.map(async (admin) => {
-      await notifyUser({
-        title: "Work Approval Required",
-        message: `${updatedWork.title} submitted by ${
-          req.user.name || req.user.email
-        } requires approval.`,
-        type: "approval",
-        moduleId: approval._id,
-        moduleModel: "Work",
-        recipient: admin._id,
-        createdBy: req.user._id,
-        link: "/work-approvals",
+      // CREATE APPROVAL ENTRY
+      const approval = await WorkApproval.create({
+        work: updatedWork._id,
+        customer: updatedWork.customer,
+        submittedBy: req.user._id,
+        assignedTo: updatedWork.assignedTo,
+        reviewMessage:
+          updatedWork.progressNote ||
+          `${updatedWork.title} submitted for approval`,
       });
-    })
-  );
-}
+
+      // FIND ADMINS
+      const admins = await User.find({
+        role: { $in: ["Admin", "admin"] },
+      });
+
+      // SEND NOTIFICATIONS TO ADMINS
+      await Promise.all(
+        admins.map(async (admin) => {
+          await notifyUser({
+            title: "Work Approval Required",
+            message: `${updatedWork.title} submitted by ${
+              req.user.name || req.user.email
+            } requires approval.`,
+            type: "approval",
+            moduleId: approval._id,
+            moduleModel: "Work",
+            recipient: admin._id,
+            createdBy: req.user._id,
+            link: "/work-approvals",
+          });
+        })
+      );
+    }
+
     if (status === "Completed") {
       title = "Work Completed";
       message = `${updatedWork.title} has been marked as completed.`;
     }
-
     if (status === "Revision") {
       title = "Revision Requested";
       message = `Revision requested for ${updatedWork.title}.`;
     }
-
     if (status === "Failed") {
       title = "Work Failed";
       message = `${updatedWork.title} has been marked as failed.`;
@@ -367,7 +383,6 @@ exports.updateWorkStatus = async (req, res) => {
     }
 
     const populatedWork = await populateWork(updatedWork._id);
-
     res.status(200).json({
       success: true,
       message: "Work status updated successfully",
@@ -382,10 +397,12 @@ exports.updateWorkStatus = async (req, res) => {
   }
 };
 
+// --------------------------------------------------------------
+// DELETE WORK
+// --------------------------------------------------------------
 exports.deleteWork = async (req, res) => {
   try {
     const work = await Work.findById(req.params.id);
-
     if (!work) {
       return res.status(404).json({
         success: false,
@@ -397,11 +414,10 @@ exports.deleteWork = async (req, res) => {
       ? work.assignedTo
       : [work.assignedTo];
 
+    // Remove from customer's embedded works
     await Customer.findByIdAndUpdate(work.customer, {
       $pull: {
-        works: {
-          work: work._id,
-        },
+        works: { work: work._id },
       },
     });
 
@@ -430,12 +446,13 @@ exports.deleteWork = async (req, res) => {
   }
 };
 
+// --------------------------------------------------------------
+// ADD WORK UPDATE
+// --------------------------------------------------------------
 exports.addWorkUpdate = async (req, res) => {
   try {
     const { message, files, timeSpent } = req.body;
-
     const work = await Work.findById(req.params.id);
-
     if (!work) {
       return res.status(404).json({
         success: false,
@@ -456,13 +473,11 @@ exports.addWorkUpdate = async (req, res) => {
     work.progressNote = message;
     work.attachments = [...(work.attachments || []), ...(files || [])];
     work.timeSpent = (work.timeSpent || 0) + (Number(timeSpent) || 0);
-
     await work.save();
 
     const assignedUsers = Array.isArray(work.assignedTo)
       ? work.assignedTo
       : [work.assignedTo];
-
     const recipients = assignedUsers.filter(
       (userId) => String(userId) !== String(req.user._id)
     );
@@ -491,7 +506,6 @@ exports.addWorkUpdate = async (req, res) => {
     }
 
     const populatedWork = await populateWork(work._id);
-
     res.status(200).json({
       success: true,
       message: "Work update added successfully",

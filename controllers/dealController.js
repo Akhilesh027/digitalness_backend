@@ -225,43 +225,44 @@ exports.moveDealStage = async (req, res) => {
       }
     }
 
-    if (stage === "Won") {
-      deal.wonOn = new Date();
+ if (stage === "Won") {
+  deal.wonOn = new Date();
 
-      if (!deal.customerCreated) {
-        const existingCustomer = await Customer.findOne({
-          $or: [
-            { contactNumbers: deal.contactNumber },
-            { phone: deal.contactNumber },
-          ],
-        });
+  if (!deal.customerCreated) {
+    const existingCustomer = await Customer.findOne({
+      $or: [
+        { contactNumbers: deal.contactNumber },
+        { phone: deal.contactNumber },
+      ],
+    });
 
-        if (existingCustomer) {
-          deal.customerId = existingCustomer._id;
-          deal.customerCreated = true;
-        } else {
-          const customer = await Customer.create({
-            name: deal.customerName,
-            businessType: deal.businessType,
-            contactNumbers: [deal.contactNumber],
-            phone: deal.contactNumber,
-            branchId: deal.branchId,
-            assignedTo: deal.assignedTo,
-            requirements: deal.leadId?.requirements?.length
-              ? deal.leadId.requirements
-              : [deal.businessType || "Service"],
-            package: deal.title,
-            totalPaid: 0,
-            totalPending: deal.dealValue || 0,
-            status: "Active",
-          });
+    if (existingCustomer) {
+      deal.customerId = existingCustomer._id;
+      deal.customerCreated = true;
+    } else {
+      const customer = await Customer.create({
+        name: deal.customerName,
+        businessType: deal.businessType,
+        contactNumbers: [deal.contactNumber],
+        phone: deal.contactNumber,          // optional, can be removed if not in schema
+        branchId: deal.branchId,
+        assignedTo: deal.assignedTo,
+        leadId: deal.leadId?._id || deal.leadId,   // ✅ link to original lead
+        requirements: deal.leadId?.requirements?.length
+          ? deal.leadId.requirements
+          : [deal.businessType || "Service"],
+        package: deal.title,
+        totalPaid: 0,
+        totalPending: deal.dealValue || 0,
+        status: "Active",
+        createdBy: req.user._id,            // ✅ who created this customer
+      });
 
-          deal.customerId = customer._id;
-          deal.customerCreated = true;
-        }
-      }
+      deal.customerId = customer._id;
+      deal.customerCreated = true;
     }
-
+  }
+}
     if (stage === "Lost") {
       deal.lostReason = lostReason || "Other";
     }
